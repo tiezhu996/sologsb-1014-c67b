@@ -153,6 +153,70 @@ button { font: inherit; }
 .step-footer { display: flex; flex-wrap: wrap; gap: 8px; color: var(--muted); font-size: 10px; }
 .has-note, .has-branch { color: #2975ab; }
 .has-counterexample { color: #a56513; }
+
+/* 成立条件 chips */
+.condition-badge {
+  padding: 2px 6px; border-radius: 5px; color: #9a6410; background: #fff2cf; font-size: 10px;
+}
+.step-conditions { display: flex; flex-wrap: wrap; gap: 6px; margin: 2px 2px 10px; }
+.condition-chip {
+  display: inline-flex; align-items: center; gap: 5px;
+  max-width: 100%; padding: 2px 8px; border-radius: 99px;
+  font-size: 10px; line-height: 1.6;
+}
+.condition-chip .katex { font-size: 11px; }
+.condition-chip.is-introduced { color: #23547a; background: #e3eff8; border: 1px solid #cfe2f0; }
+.condition-chip.is-outstanding { color: #8f5a10; background: #fdf1d6; border: 1px solid #f0dfb0; }
+.condition-chip.is-discharged { color: #4d7a5c; background: #e7f4ec; border: 1px solid #cfe6d8; }
+.condition-chip.is-discharged .katex { text-decoration: line-through; opacity: .7; }
+.condition-remove, .condition-discharge {
+  border: 0; cursor: pointer; font-size: 10px; line-height: 1;
+  border-radius: 5px; padding: 2px 5px;
+}
+.condition-remove { color: #9aa4af; background: transparent; }
+.condition-remove:hover { color: #c93d4c; background: #fdecef; }
+.condition-discharge { color: #fff; background: #286ea8; }
+.condition-discharge:hover { background: #1c5a8c; }
+
+/* 目标缺口 */
+.goal-card.has-gap { border-left-color: #c93d4c; }
+.goal-gap {
+  grid-column: 1 / -1; display: flex; flex-wrap: wrap; align-items: center; gap: 6px;
+  margin-top: 4px; padding: 8px 10px; border-radius: 8px;
+  color: #8f2532; background: #fff0f2; font-size: 11px;
+}
+.goal-gap strong { color: #c93d4c; }
+
+/* 检查器条件编辑 */
+.condition-editor { display: grid; gap: 8px; }
+.condition-group { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.condition-group-label { color: #7d8794; font-size: 10px; font-weight: 700; letter-spacing: .04em; }
+.condition-add {
+  border: 1px dashed #b9c6d3; border-radius: 99px; padding: 2px 9px;
+  color: #286ea8; background: #f7fafc; font-size: 10px; cursor: pointer;
+}
+.condition-add:hover { border-color: #286ea8; background: #edf5fa; }
+
+/* 分支面板 */
+.branch-list { padding: 6px; display: grid; gap: 2px; }
+.branch-row { display: flex; align-items: center; gap: 2px; border-radius: 8px; }
+.branch-row.is-active { background: #eef4f9; }
+.branch-item {
+  flex: 1; min-width: 0; border: 0; background: transparent; cursor: pointer;
+  padding: 8px 9px; display: flex; justify-content: space-between; align-items: center;
+  color: var(--ink); border-radius: 8px;
+}
+.branch-item:hover { background: #edf3f8; }
+.branch-row.is-active .branch-item { color: var(--blue); }
+.branch-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; font-weight: 600; }
+.branch-item small { color: var(--muted); font-size: 10px; }
+.branch-delete {
+  border: 0; background: transparent; color: #aab4c0; cursor: pointer;
+  font-size: 15px; padding: 0 8px; border-radius: 6px;
+}
+.branch-delete:hover { color: #c93d4c; background: #fdecef; }
+.branch-panel .button { margin: 0 10px 10px; width: calc(100% - 20px); }
+
 .empty-state { padding: 60px; text-align: center; color: var(--muted); background: #fff; border: 1px dashed var(--line); border-radius: 14px; }
 .inspector { max-height: calc(100vh - 102px); overflow-y: auto; padding-bottom: 12px; }
 .inspector > *:not(.panel-heading) { margin-left: 12px; margin-right: 12px; }
