@@ -1,6 +1,8 @@
 import m, { type Component } from 'mithril';
 import katex from 'katex';
 import { compareVersion, ProofStore, RULES } from './store';
+import { analyzeBranch, branchConditions, MAIN_BRANCH, suggestConditions } from './obligations';
+import type { BranchAnalysis } from './obligations';
 import type { ProofDocument, ProofStep } from './types';
 
 const store = new ProofStore();
@@ -53,34 +55,88 @@ function download(name: string, content: string, mime: string): void {
   URL.revokeObjectURL(link.href);
 }
 
-function exportMarkdown(document: ProofDocument): string {
-  const lines = [`# ${document.title}`, '', `**证明目标：** $${document.goal}$`, ''];
-  document.steps.forEach((step, index) => {
-    const refs = step.references.map((id) => `步骤 ${document.steps.findIndex((item) => item.id === id) + 1}`).filter((ref) => ref !== '步骤 0');
+function exportMarkdown(document: ProofDocument, analysis: BranchAnalysis): string {
+  const branch = document.branches.find((item) => item.id === analysis.branchId);
+  const steps = analysis.steps;
+  const indexOf = (id: string) => steps.findIndex((item) => item.id === id);
+  const conditionText = (id: string) => document.conditions.find((condition) => condition.id === id)?.label ?? id;
+  const lines = [
+    `# ${document.title}`,
+    '',
+    `**证明分支：** ${branch?.name ?? '主分支'}`,
+    `**证明目标：** $${document.goal}$`,
+    '',
+  ];
+  steps.forEach((step, index) => {
+    const refs = step.references.map((id) => `步骤 ${indexOf(id) + 1}`).filter((ref) => !ref.endsWith('0'));
     lines.push(`## ${index + 1}. ${step.statement}`);
     lines.push('');
     lines.push(`- 类型：${typeLabel[step.type]}`);
     lines.push(`- 推理规则：${step.rule}`);
     if (refs.length) lines.push(`- 依据：${refs.join('、')}`);
+    const incoming = [...(analysis.incoming.get(step.id) ?? [])];
+    if (incoming.length) lines.push(`- 引用时仍需满足：${incoming.map(conditionText).join('、')}`);
+    if (step.introducedConditions.length) lines.push(`- 本步附加条件：${step.introducedConditions.map(conditionText).join('、')}`);
+    if (step.dischargedConditions.length) lines.push(`- 本步收回条件：${step.dischargedConditions.map(conditionText).join('、')}`);
     if (step.note) lines.push(`- 旁注：${step.note}`);
     if (step.counterexample) lines.push(`- 反例：${step.counterexample}`);
     if (step.alternative) lines.push(`- 替代分支：${step.alternative}`);
     lines.push('');
   });
+  lines.push('## 成立条件台账（本分支）');
+  if (branchConditions(document, analysis.branchId).length === 0) {
+    lines.push('- 无附加成立条件。');
+  } else {
+    branchConditions(document, analysis.branchId).forEach((condition) => {
+      const open = analysis.openConditions.includes(condition.id);
+      const introduced = indexOf(condition.introducedAt) + 1;
+      lines.push(`- ${condition.label}：引入于步骤 ${introduced > 0 ? introduced : '?'}，状态：${open ? '未收回（证明缺口）' : '已收回'}`);
+    });
+  }
+  lines.push('');
   lines.push('## 符号表');
   Object.entries(document.symbols).forEach(([symbol, meaning]) => lines.push(`- $${symbol}$：${meaning}`));
   return lines.join('\n');
 }
 
-function exportLatex(document: ProofDocument): string {
-  const lines = ['\\documentclass{article}', '\\usepackage{amsmath,amssymb}', '\\begin{document}', `\\section*{${document.title}}`, `\\textbf{证明目标：} $${document.goal}$`, '\\begin{enumerate}'];
-  document.steps.forEach((step) => {
-    const refs = step.references.map((id) => document.steps.findIndex((item) => item.id === id) + 1).filter(Boolean);
+function exportLatex(document: ProofDocument, analysis: BranchAnalysis): string {
+  const branch = document.branches.find((item) => item.id === analysis.branchId);
+  const steps = analysis.steps;
+  const indexOf = (id: string) => steps.findIndex((item) => item.id === id);
+  const conditionText = (id: string) => document.conditions.find((condition) => condition.id === id)?.label.replace(/\$/g, '') ?? id;
+  const lines = [
+    '\\documentclass{article}',
+    '\\usepackage{amsmath,amssymb}',
+    '\\begin{document}',
+    `\\section*{${document.title}}`,
+    `\\textbf{证明分支：} ${branch?.name ?? '主分支'}\\\\`,
+    `\\textbf{证明目标：} $${document.goal}$`,
+    '\\begin{enumerate}',
+  ];
+  steps.forEach((step) => {
+    const refs = step.references.map((id) => indexOf(id) + 1).filter(Boolean);
     const support = refs.length ? `（依据 ${refs.join(', ')}；${step.rule}）` : `（${step.rule}）`;
     lines.push(`  \\item ${step.statement} ${support}`);
+    const incoming = [...(analysis.incoming.get(step.id) ?? [])].map(conditionText);
+    if (incoming.length) lines.push(`  \\par\\small 引用时仍需满足：${incoming.join('；')}`);
+    if (step.introducedConditions.length) lines.push(`  \\par\\small 附加条件：${step.introducedConditions.map(conditionText).join('；')}`);
+    if (step.dischargedConditions.length) lines.push(`  \\par\\small 收回条件：${step.dischargedConditions.map(conditionText).join('；')}`);
     if (step.note) lines.push(`  \\par\\small 旁注：${step.note}`);
   });
-  lines.push('\\end{enumerate}', '\\end{document}');
+  lines.push('\\end{enumerate}');
+  lines.push(`\\paragraph*{成立条件台账（${branch?.name ?? '主分支'}）}`);
+  if (branchConditions(document, analysis.branchId).length === 0) {
+    lines.push('无附加成立条件。');
+  } else {
+    lines.push('\\begin{itemize}');
+    branchConditions(document, analysis.branchId).forEach((condition) => {
+      const open = analysis.openConditions.includes(condition.id);
+      const introduced = indexOf(condition.introducedAt) + 1;
+      lines.push(`  \\item $${condition.label.replace(/\$/g, '')}$：引入于步骤 ${introduced > 0 ? introduced : '?'}，${open ? '\\textbf{未收回}' : '已收回'}`);
+    });
+    lines.push('\\end{itemize}');
+  }
+  lines.push('\\end{document}');
   return lines.join('\n');
 }
 
@@ -145,6 +201,10 @@ export class ProofApp implements Component {
     const checks = store.checks;
     const errors = checks.filter((check) => check.severity === 'error').length;
     const warnings = checks.filter((check) => check.severity === 'warning').length;
+    const analysis = analyzeBranch(document, store.branchId);
+    const branchSteps = analysis.steps;
+    const indexInBranch = (id: string) => branchSteps.findIndex((step) => step.id === id);
+    const conditionById = (id: string) => document.conditions.find((condition) => condition.id === id);
     const selectedVersion = document.versions.find((version) => version.id === store.compareVersionId);
     const diff = selectedVersion ? compareVersion(document, selectedVersion) : [];
 
@@ -175,21 +235,33 @@ export class ProofApp implements Component {
               onclick: () => { store.selectDocument(item.id); m.redraw(); },
             }, [
               m('span.document-glyph', item.steps.length),
-              m('span.document-copy', [m('strong', item.title), m('small', `${item.steps.length} 步 · ${item.author}`)]),
+              m('span.document-copy', [m('strong', item.title), m('small', `${item.steps.length} 步 · ${item.branches.length} 分支 · ${item.author}`)]),
               m('span.chevron', '›'),
             ]))),
           ]),
           m('section.panel.version-panel', [
             m('div.panel-heading', [m('span', '版本快照'), m('span.count-badge', document.versions.length)]),
-            document.versions.length === 0 && m('p.empty-copy', '保存快照后，可以并排查看改动。'),
-            m('div.version-list', document.versions.map((version) => m('button.version-item', {
-              class: version.id === store.compareVersionId ? 'is-active' : '',
-              onclick: () => { store.compareVersionId = store.compareVersionId === version.id ? '' : version.id; m.redraw(); },
-            }, [
-              m('span', version.name),
-              m('small', new Date(version.createdAt).toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' })),
-            ]))),
-            m('button.button.is-fullwidth.is-small', { onclick: () => { store.createVersion(); m.redraw(); } }, '＋ 保存当前版本'),
+            document.versions.length === 0 && m('p.empty-copy', '保存快照后，可以并排查看改动。快照只包含保存时所在分支。'),
+            m('div.version-list', document.versions.map((version) => {
+              const inCurrentBranch = !version.branchId || version.branchId === store.branchId;
+              return m('button.version-item', {
+                class: version.id === store.compareVersionId ? 'is-active' : '',
+                disabled: !inCurrentBranch,
+                title: inCurrentBranch ? '对比该快照' : `该快照属于「${version.branchName ?? '其他分支'}」，切换分支后查看`,
+                onclick: () => {
+                  if (!inCurrentBranch) return;
+                  store.compareVersionId = store.compareVersionId === version.id ? '' : version.id;
+                  m.redraw();
+                },
+              }, [
+                m('span', [
+                  version.name,
+                  !inCurrentBranch && m('em.version-branch', `（${version.branchName ?? '其他分支'}）`),
+                ]),
+                m('small', new Date(version.createdAt).toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' })),
+              ]);
+            })),
+            m('button.button.is-fullwidth.is-small', { onclick: () => { store.createVersion(); m.redraw(); } }, `＋ 保存「${store.branch.name}」快照`),
           ]),
           m('section.check-summary', [
             m('div.check-summary-head', [
@@ -199,21 +271,27 @@ export class ProofApp implements Component {
             m('div.check-summary-bars', [
               m('span', { style: { width: `${Math.max(8, 100 - errors * 24 - warnings * 12)}%` } }),
             ]),
-            m('p', errors ? '修正错误后再保存为定稿。' : warnings ? '结构有效，仍有待核对项。' : '当前结构与引用关系完整。'),
+            m('p', errors
+              ? `当前分支有 ${errors} 个错误（含未收回条件造成的证明缺口）。`
+              : warnings
+                ? '结构有效，仍有待核对项。'
+                : analysis.openConditions.length
+                  ? '当前分支仍有条件在传递中。'
+                  : '当前分支条件已全部收回，结构完整。'),
           ]),
         ]),
         m('section.editor-column', [
           m('div.editor-titlebar', [
             m('div', [
               m('input.title-input', { value: document.title, oninput: (event: Event) => { store.update((item) => { item.title = (event.target as HTMLInputElement).value; }); } }),
-              m('div.editor-meta', [`${document.author} · ${document.steps.length} 个步骤`, m('span.keyboard-hint', '拖动 ⠿ 排序')]),
+              m('div.editor-meta', [`${document.author} · ${store.branch.name} · ${branchSteps.length} 个步骤`, m('span.keyboard-hint', '拖动 ⠿ 排序')]),
             ]),
             m('div.export-actions', [
-              m('button.button.is-small', { onclick: () => download(`${document.title}.md`, exportMarkdown(document), 'text/markdown;charset=utf-8') }, '导出 Markdown'),
-              m('button.button.is-small', { onclick: () => download(`${document.title}.tex`, exportLatex(document), 'application/x-tex;charset=utf-8') }, '导出 LaTeX'),
+              m('button.button.is-small', { onclick: () => download(`${document.title}-${store.branch.name}.md`, exportMarkdown(document, analysis), 'text/markdown;charset=utf-8') }, '导出 Markdown'),
+              m('button.button.is-small', { onclick: () => download(`${document.title}-${store.branch.name}.tex`, exportLatex(document, analysis), 'application/x-tex;charset=utf-8') }, '导出 LaTeX'),
             ]),
           ]),
-          m('section.goal-card', [
+          m('section.goal-card', { class: analysis.goalOpenConditions.length ? 'has-gap' : '' }, [
             m('div.goal-label', '证明目标'),
             m('div.goal-formula', renderRichText(`$${document.goal}$`)),
             m('input.formula-input', {
@@ -222,17 +300,62 @@ export class ProofApp implements Component {
               oninput: (event: Event) => store.update((item) => { item.goal = (event.target as HTMLInputElement).value; }),
               'aria-label': '证明目标',
             }),
+            m('div.goal-obligations', { class: analysis.goalOpenConditions.length ? 'is-open' : 'is-clear' }, analysis.goalOpenConditions.length
+              ? [
+                  m('strong', `证明缺口：目标仍带 ${analysis.goalOpenConditions.length} 项未收回条件`),
+                  m('span.goal-condition-list', analysis.goalOpenConditions.map((conditionId) =>
+                    m('span.condition-chip.is-open', renderRichText(conditionById(conditionId)?.label ?? conditionId)))),
+                ]
+              : [m('strong', analysis.goalStep ? '目标上的成立条件已全部收回' : '尚无结论步骤'), m('span', analysis.goalStep ? '当前结论不附带任何未收回的参数限制。' : '在当前分支添加“结论”步骤后再核对条件。')]),
+          ]),
+          m('div.branch-bar', [
+            m('div.branch-tabs', document.branches.map((branch) => {
+              const branchAnalysis = analyzeBranch(document, branch.id);
+              const openCount = branchAnalysis.openConditions.length;
+              const gapCount = branchAnalysis.goalOpenConditions.length;
+              return m('button.branch-tab', {
+                class: branch.id === store.branchId ? 'is-active' : '',
+                onclick: () => { store.selectBranch(branch.id); m.redraw(); },
+                title: `${branch.name}：${openCount} 项条件未收回，${gapCount} 项压在目标上`,
+              }, [
+                m('span.branch-name', branch.name),
+                m('span.branch-badge', { class: gapCount ? 'has-gap' : openCount ? 'has-open' : 'is-clear' }, gapCount ? `缺口 ${gapCount}` : openCount ? `待收回 ${openCount}` : '已闭环'),
+                branch.id === store.branchId && branch.id !== MAIN_BRANCH && m('span.branch-delete', {
+                  title: '删除该分支',
+                  onclick: (event: Event) => { event.stopPropagation(); store.removeBranch(branch.id); m.redraw(); },
+                }, '×'),
+              ]);
+            })),
+            m('div.branch-actions', [
+              m('button.button.is-small.is-white', {
+                title: '从当前选中步骤处分出替代分支，条件与收回记录各自独立保存',
+                onclick: () => {
+                  const name = window.prompt('新分支名称（复制当前分支到选中步骤为止的内容）', `分支 ${document.branches.length + 1}`);
+                  if (name === null) return;
+                  store.forkBranch(name, store.selectedStepId);
+                  m.redraw();
+                },
+              }, '⎇ 从此处分出分支'),
+              m('button.button.is-small.is-white', {
+                title: '新建一个空白分支',
+                onclick: () => { store.addBlankBranch(); m.redraw(); },
+              }, '＋ 空白分支'),
+            ]),
           ]),
           m('div.steps-toolbar', [
-            m('div', [m('strong', '证明步骤'), m('span.steps-count', `${document.steps.length} 步`)]),
+            m('div', [m('strong', '证明步骤'), m('span.steps-count', `${store.branch.name} · ${branchSteps.length} 步`)]),
             m('div.steps-toolbar-actions', [
               m('button.button.is-small.is-white', { onclick: () => { store.addStep('premise'); m.redraw(); } }, '＋ 前提'),
               m('button.button.is-small.is-white', { onclick: () => { store.addStep('derivation'); m.redraw(); } }, '＋ 推导'),
               m('button.button.is-small.is-white', { onclick: () => { store.addStep('goal'); m.redraw(); } }, '＋ 结论'),
             ]),
           ]),
-          m('div.steps-list', document.steps.length === 0 && m('div.empty-state', '尚无步骤。按 Ctrl+Enter 开始添加。'), document.steps.map((step, index) => {
+          m('div.steps-list', branchSteps.length === 0 && m('div.empty-state', '当前分支尚无步骤。按 Ctrl+Enter 开始添加。'), branchSteps.map((step, index) => {
             const stepChecks = checks.filter((check) => check.stepId === step.id);
+            const incoming = [...(analysis.incoming.get(step.id) ?? new Set<string>())];
+            const outgoing = [...(analysis.outgoing.get(step.id) ?? new Set<string>())];
+            const introduced = step.introducedConditions.map((id) => conditionById(id)).filter(Boolean);
+            const discharged = step.dischargedConditions.map((id) => conditionById(id)).filter(Boolean);
             return m('article.step-card', {
               'data-step': step.id,
               class: step.id === store.selectedStepId ? 'is-selected' : '',
@@ -251,18 +374,29 @@ export class ProofApp implements Component {
                   m('span.tag', { class: step.type === 'goal' ? 'is-success' : step.type === 'premise' ? 'is-info' : 'is-light' }, typeLabel[step.type]),
                   m('span.rule-chip', step.rule),
                   m('span.step-id', `#${shortId(step.id)}`),
+                  outgoing.length > 0 && m('span.obligation-badge', { class: step.type === 'goal' ? 'has-gap' : '', title: '本步之后仍需满足的成立条件' }, `剩余条件 ${outgoing.length}`),
                   stepChecks.length > 0 && m('span.issue-badge', `${stepChecks.length} 项检查`),
                   m('button.step-menu', { onclick: (event: Event) => { event.stopPropagation(); store.removeStep(step.id); m.redraw(); }, title: '删除步骤' }, '×'),
                 ]),
                 m('div.step-statement', renderRichText(step.statement)),
+                (introduced.length > 0 || discharged.length > 0) && m('div.condition-flow', [
+                  introduced.map((condition) => m('span.condition-chip.is-introduced', [m('i', '附加 '), renderRichText(condition!.label)])),
+                  discharged.map((condition) => m('span.condition-chip.is-discharged', [m('i', '收回 '), renderRichText(condition!.label)])),
+                ]),
                 m('div.step-footer', [
                   m('span', step.references.length ? `依据：${step.references.map((reference) => {
-                    const referenceIndex = document.steps.findIndex((item) => item.id === reference);
-                    return referenceIndex >= 0 ? `步骤 ${referenceIndex + 1}` : `缺失 ${shortId(reference)}`;
+                    const referenceIndex = indexInBranch(reference);
+                    if (referenceIndex >= 0) {
+                      const refOpen = [...(analysis.outgoing.get(reference) ?? new Set<string>())];
+                      return refOpen.length ? `步骤 ${referenceIndex + 1}（尚带 ${refOpen.length} 条件）` : `步骤 ${referenceIndex + 1}`;
+                    }
+                    const foreign = document.steps.find((item) => item.id === reference);
+                    return foreign ? `跨分支引用 ${shortId(reference)}` : `缺失 ${shortId(reference)}`;
                   }).join('、')}` : '独立前提'),
+                  incoming.length > 0 && m('span.incoming-note', `引用时继承 ${incoming.length} 项条件`),
                   step.note && m('span.has-note', '含旁注'),
                   step.counterexample && m('span.has-counterexample', '含反例'),
-                  step.alternative && m('span.has-branch', '含替代分支'),
+                  step.alternative && m('span.has-branch', '含替代思路'),
                 ]),
               ]),
             ]);
@@ -300,20 +434,89 @@ export class ProofApp implements Component {
                 m.redraw();
               },
             }, snippet.label))),
-            m('label.field-label', '引用步骤'),
-            m('div.reference-list', document.steps.filter((step) => step.id !== selected.id).map((step) => m('label.reference-item', [
-              m('input', {
-                type: 'checkbox',
-                checked: selected.references.includes(step.id),
-                onchange: (event: Event) => {
-                  const checked = (event.target as HTMLInputElement).checked;
-                  const references = checked ? [...selected.references, step.id] : selected.references.filter((id) => id !== step.id);
-                  store.updateStep({ references });
-                },
-              }),
-              m('span', `步骤 ${document.steps.indexOf(step) + 1}`),
-              m('small', step.statement.replace(/\$/g, '')),
-            ]))),
+            m('label.field-label', '引用步骤（仅限当前分支，引用时继承其未收回条件）'),
+            m('div.reference-list', branchSteps.filter((step) => step.id !== selected.id).map((step) => {
+              const refOpen = [...(analysis.outgoing.get(step.id) ?? new Set<string>())];
+              return m('label.reference-item', [
+                m('input', {
+                  type: 'checkbox',
+                  checked: selected.references.includes(step.id),
+                  onchange: (event: Event) => {
+                    const checked = (event.target as HTMLInputElement).checked;
+                    const references = checked ? [...selected.references, step.id] : selected.references.filter((id) => id !== step.id);
+                    store.updateStep({ references });
+                  },
+                }),
+                m('span', [
+                  `步骤 ${indexInBranch(step.id) + 1}`,
+                  refOpen.length > 0 && m('em.ref-open', `剩 ${refOpen.length}`),
+                ]),
+                m('small', step.statement.replace(/\$/g, '')),
+              ]);
+            })),
+            m('div.obligation-panel', [
+              m('label.field-label', '成立条件（随引用传递、可被本步收回）'),
+              (() => {
+                const incoming = [...(analysis.incoming.get(selected.id) ?? new Set<string>())];
+                // 本步可收回 = 引用继承的义务 ∪ 本步自己引入的条件（去重，同一步引入即可收回）。
+                const dischargeableIds = [...new Set([...incoming, ...selected.introducedConditions])];
+                const conditionLabelAt = (id: string) => conditionById(id)?.label ?? id;
+                return m('div.obligation-body', [
+                  m('div.obligation-group', [
+                    m('span.obligation-group-title', incoming.length
+                      ? `引用时仍剩 ${incoming.length} 项，勾选即在本步收回：`
+                      : '引用步骤没有未收回条件；本步引入的条件也可立即收回：'),
+                    ...dischargeableIds.map((id) => m('label.discharge-item', [
+                      m('input', {
+                        type: 'checkbox',
+                        checked: selected.dischargedConditions.includes(id),
+                        onchange: () => { store.toggleDischarge(selected.id, id); m.redraw(); },
+                      }),
+                      m('span', [
+                        renderRichText(conditionLabelAt(id)),
+                        selected.introducedConditions.includes(id) && !incoming.includes(id) && m('em.self-tag', '本步引入'),
+                      ]),
+                    ])),
+                  ]),
+                  m('div.obligation-actions', [
+                    m('button.button.is-small.is-white', {
+                      onclick: () => {
+                        const label = window.prompt('输入本步附加的成立条件（如 $a \\ne 0$、$x \\ge 0$）');
+                        if (label === null || !label.trim()) return;
+                        store.addCondition(selected.id, label);
+                        m.redraw();
+                      },
+                    }, '＋ 附加条件'),
+                    m('button.button.is-small.is-white', {
+                      title: '根据公式中的分式、根号等猜测常见条件',
+                      onclick: () => {
+                        const suggestions = suggestConditions(selected.statement)
+                          .filter((label) => !document.conditions.some((condition) => condition.branchId === store.branchId && condition.label === label));
+                        if (!suggestions.length) {
+                          store.notify('没有从公式中识别到新的常见条件');
+                          return;
+                        }
+                        const picked = window.prompt('识别到的条件（可删改，多个用 || 分隔）', suggestions.join(' || '));
+                        if (!picked) return;
+                        picked.split('||').map((item) => item.trim()).filter(Boolean).forEach((label) => store.addCondition(selected.id, label));
+                        m.redraw();
+                      },
+                    }, '⚡ 识别分母/根号'),
+                  ]),
+                  selected.introducedConditions.length > 0 && m('div.obligation-group', [
+                    m('span.obligation-group-title', '本步引入：'),
+                    ...selected.introducedConditions.map((id) => m('span.introduced-row', [
+                      m('span.condition-chip.is-introduced', renderRichText(conditionLabelAt(id))),
+                      m('button.link-button', { onclick: () => { store.removeCondition(id); m.redraw(); }, title: '删除该条件' }, '移除'),
+                    ])),
+                  ]),
+                  selected.dischargedConditions.length > 0 && m('div.obligation-group', [
+                    m('span.obligation-group-title', '本步收回：'),
+                    ...selected.dischargedConditions.map((id) => m('span.condition-chip.is-discharged', renderRichText(conditionLabelAt(id)))),
+                  ]),
+                ]);
+              })(),
+            ]),
             m('div.field-grid', [
               m('div', [m('label.field-label', '旁注'), m('textarea.textarea.is-small', { rows: 2, value: selected.note, placeholder: '记录思路或条件', oninput: (event: Event) => store.updateStep({ note: (event.target as HTMLTextAreaElement).value }) })]),
               m('div', [m('label.field-label', '反例 / 边界情况'), m('textarea.textarea.is-small', { rows: 2, value: selected.counterexample, placeholder: '尝试寻找反例', oninput: (event: Event) => store.updateStep({ counterexample: (event.target as HTMLTextAreaElement).value }) })]),
@@ -336,6 +539,36 @@ export class ProofApp implements Component {
               m('input.symbol-meaning', { value: meaning, oninput: (event: Event) => store.update((item) => { item.symbols[symbol] = (event.target as HTMLInputElement).value; }) }),
             ]))),
           ]),
+          m('section.panel.ledger-panel', [
+            m('div.panel-heading', [
+              m('span', `条件台账 · ${store.branch.name}`),
+              m('span.count-badge', { class: analysis.openConditions.length ? 'has-gap' : '' }, `${analysis.openConditions.length} 未收回`),
+            ]),
+            branchConditions(document, store.branchId).length === 0
+              ? m('p.empty-copy', '本分支还没有附加成立条件。在步骤检查器中为某一步“附加条件”（如分母非零、根号内非负）。')
+              : m('div.ledger-list', branchConditions(document, store.branchId).map((condition) => {
+                const open = analysis.openConditions.includes(condition.id);
+                const onGoal = analysis.goalOpenConditions.includes(condition.id);
+                const introducedIndex = indexInBranch(condition.introducedAt) + 1;
+                const dischargeSteps = branchSteps.filter((step) => step.dischargedConditions.includes(condition.id));
+                return m('div.ledger-row', { class: open ? 'is-open' : 'is-closed' }, [
+                  m('span.ledger-status', { class: onGoal ? 'on-goal' : open ? 'open' : 'closed', title: open ? '未收回' : '已收回' }, onGoal ? '缺口' : open ? '传递中' : '已收回'),
+                  m('div.ledger-copy', [
+                    m('strong', renderRichText(condition.label)),
+                    m('small', [
+                      `引入于步骤 ${introducedIndex > 0 ? introducedIndex : '?'}`,
+                      dischargeSteps.length
+                        ? `；收回于 ${dischargeSteps.map((step) => `步骤 ${indexInBranch(step.id) + 1}`).join('、')}`
+                        : open ? '；尚无步骤收回' : '',
+                    ]),
+                  ]),
+                  m('button.link-button', {
+                    title: '删除该条件及其全部收回记录',
+                    onclick: () => { store.removeCondition(condition.id); m.redraw(); },
+                  }, '×'),
+                ]);
+              })),
+          ]),
           m('section.panel.checks-panel', [
             m('div.panel-heading', [m('span', '检查结果'), m('span.count-badge', checks.length)]),
             m('div.check-list', checks.map((check) => m('button.check-item', {
@@ -357,7 +590,7 @@ export class ProofApp implements Component {
       selectedVersion && m('div.diff-overlay', { onclick: () => { store.compareVersionId = ''; m.redraw(); } }, [
         m('section.diff-dialog', { onclick: (event: Event) => event.stopPropagation() }, [
           m('header.diff-head', [
-            m('div', [m('span.eyebrow', 'VERSION DIFF'), m('h2', `${selectedVersion.name} ↔ 当前版本`)]),
+            m('div', [m('span.eyebrow', 'VERSION DIFF'), m('h2', `${selectedVersion.name} ↔ 当前（${store.branch.name}）`)]),
             m('button.delete', { onclick: () => { store.compareVersionId = ''; m.redraw(); } }),
           ]),
           m('div.diff-summary', [
